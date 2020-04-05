@@ -1,0 +1,452 @@
+---
+title: "Bayesian implementation of capture-recapture models with robust design"
+output:
+  html_document:
+    keep_md: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Motivation
+
+I am currently involved in the [estimation of the population size of the brown bear population in the Pyrenees](https://www.biorxiv.org/content/10.1101/075663v1). So far, we have been using a frequentist capture-recapture approach using the robust design. Because it is a small population, I'm interested in implementing a Bayesian approach. To do so, Thomas Riecke and colleagues have proposed [a parameterization and some BUGS code](https://besjournals.onlinelibrary.wiley.com/doi/abs/10.1111/2041-210X.13065) to fit robust-design capture-recapture methods. Here, I am using the code they made available, tweaking it a bit and making it generic. Also, I provide a fully reproducible example. For more details about the robust design, check out [the dedicated chapter](http://www.phidot.org/software/mark/docs/book/pdf/chap15.pdf) in the Gentle Introduction to Mark. For extension of the Riecke's model to Jolly-Seber models, see [here](https://esajournals.onlinelibrary.wiley.com/doi/full/10.1002/ecs2.2334), and for an alternative Bayesian implementation of the robust design, check out the work by Robert Rankin and colleagues [there](https://www.frontiersin.org/articles/10.3389/fmars.2016.00025/full).
+
+## Frequentist approach
+
+I will use a robust design example data set that comes with program `MARK`, check out `?RMark::robust`. 
+
+First, we load the packages we will need in this section:
+```{r}
+library(RMark)
+library(tidyverse)
+```
+
+### Data
+
+Then we load the data
+```{r}
+data(robust)
+head(robust)
+```
+
+We need to define the time intervals: 
+```{r}
+time.intervals <- c(0, 1,            # primary occasion 1, 2 secondary occasions
+                    0, 1,            # primary occasion 2, 2 secondary occasions
+                    0, 0, 0, 1,      # primary occasion 3, 4 secondary occasions
+                    0, 0, 0, 0, 1,   # primary occasion 4, 5 secondary occasions
+                    0)               # primary occasion 5, 2 secondary occasions
+```
+
+### Random emigration
+
+We fit a model with constant survival, constant detection and **random temporary emigration**:
+```{r}
+p.dot <- list(formula=~1, share = TRUE)
+S.dot <- list(formula=~1)
+GammaDoublePrime.dot <- list(formula=~1, 
+                                share = TRUE)
+model.1 <- mark(data = robust, 
+                model = "Robust",
+                time.intervals = time.intervals,
+                model.parameters = list(S = S.dot,
+                                        GammaDoublePrime = GammaDoublePrime.dot,
+                                        p = p.dot),
+                threads=2,
+                output = FALSE)
+```
+
+Print the parameter estimates:
+```{r}
+model.1$results$real
+```
+
+and the population size estimates:
+```{r}
+model.1$results$derived$`N Population Size`
+```
+
+### Markovian emigration
+
+We fit the same model with **Markovian temporary emigration** now:
+```{r}
+p.dot <- list(formula=~1, share = TRUE)
+S.dot <- list(formula=~1)
+GammaDoublePrime.dot <- list(formula=~1)
+GammaPrime.dot <- list(formula=~1)
+model.2 <- mark(data = robust, 
+                model = "Robust",
+                time.intervals = time.intervals,
+                model.parameters = list(S = S.dot,
+                                        GammaPrime = GammaPrime.dot,
+                                        GammaDoublePrime = GammaDoublePrime.dot,
+                                        p = p.dot),
+                threads=2,
+                output = FALSE)
+```
+
+Print the parameter estimates:
+```{r}
+model.2$results$real
+```
+
+and the population size estimates:
+```{r}
+model.2$results$derived$`N Population Size`
+```
+
+Now that we have our results with the frequentist approach, let's implement the Bayesian approach and compare the estimates.
+
+## Bayesian approach 
+
+### Data
+
+First, we separate the columns of the capture-recapture dataset:
+```{r}
+chx <- NULL
+for (i in 1:nrow(robust)){
+  chx <- rbind(chx, unlist(str_split(robust$ch[i],'')))
+}
+head(chx)
+```
+
+Now we need to duplicate the encounter histories for which there more than one individual with that partcular history:
+```{r}
+encounter <- NULL 
+for (i in 1:length(robust$freq)){
+  if (robust$freq[i] == 1) encounter <- rbind(encounter, as.numeric(chx[i,]))
+  if (robust$freq[i] > 1) encounter <- rbind(encounter, matrix(rep(as.numeric(chx[i,]), robust$freq[i]), nrow = robust$freq[i], byrow= T))
+}
+head(encounter)
+```
+
+We compute several quantities that we will need:
+```{r}
+n.ind <- nrow(encounter) # number of individuals
+n.secondary <- c(2, 2, 4, 5, 2) # number of secondary occasions per primary occasion
+n.primary <- length(n.secondary) # number of primary occasions
+index <- list(1:2,
+              3:4,
+              5:8,
+              9:13,
+              14:15) # the secondary occasions
+```
+
+We calculate the number of individuals caught in each primary occasion, which we will need to get an estimate of population size:
+```{r}
+caught <- rep(NA, n.primary)
+for (i in 1:n.primary){
+  tmp <- encounter[,index[[i]]]
+  caught[i] <- nrow(tmp[rowSums(tmp)!=0,])
+}
+caught
+```
+
+We format the data as an array with dimensions the number of individuals times the number of primary occasions times the number of secondary occasions: 
+```{r}
+obs <- array(NA, dim = c(n.ind, n.primary, max(n.secondary)))
+for (i in 1:n.primary){
+    obs[,i,1:n.secondary[i]] <- encounter[,index[[i]]]
+}
+dim(obs)
+```
+
+Now we format the data as required in the Bayesian implementation of the robust design:
+```{r}
+ch <- matrix(NA, n.ind, n.primary)
+for (i in 1:n.ind){
+  for (t in 1:n.primary){
+    ifelse(any(obs[i,t,1:n.secondary[t]] == 1), ch[i,t] <- 1, ch[i,t] <- 2)
+  }
+}
+```
+
+We summarize detections by primary and secondary occasions:
+```{r}
+test <- matrix(NA, n.ind, n.primary)
+for (i in 1:nrow(test)){
+  for (j in 1:ncol(test)){
+    test[i,j] <- sum(obs[i,j,], na.rm = TRUE)
+  }
+}
+
+seen <- array(NA, c(n.ind, n.primary, max(n.secondary)))
+missed <- array(NA, c(n.ind, n.primary, max(n.secondary)))
+
+for (i in 1:nrow(test)){
+  for (t in 1:ncol(test)){
+    for (j in 1:n.secondary[t]){
+      if(test[i,t] > 1 & obs[i,t,j] == 1){seen[i,t,j] <- 1}
+      if(test[i,t] >= 1 & obs[i,t,j] == 0){missed[i,t,j] <- 1}
+    }
+  }
+}
+
+yes <- matrix(NA, n.primary, max(n.secondary))
+no <- matrix(NA, n.primary, max(n.secondary))
+
+for (i in 1:nrow(yes)){
+  for (j in 1:ncol(yes)){
+    yes[i,j] <- sum(seen[,i,j], na.rm = TRUE)
+    no[i,j] <- sum(missed[,i,j], na.rm = TRUE)
+  }
+}
+
+total <- yes + no
+total
+```
+
+Get first occasions of capture:
+```{r}
+get.first <- function(x)min(which (x != 2))
+first <- apply(ch,1,get.first); first[first == "Inf"] <- NA
+```
+
+Cut individuals released in last primary occasion:
+```{r}
+ch <- subset(ch, first != n.primary)
+first <- subset(first, first != n.primary)
+```
+
+Define initial values for the latent states:
+```{r}
+z.init <- matrix(NA, nrow(ch), ncol(ch))
+for (i in 1:nrow(ch)){
+  if(first[i] < ncol(z.init)){
+    z.init[i,(first[i] + 1):ncol(z.init)] <- 1
+  }
+}
+```
+
+### Markovian emigration
+
+Load the package we need to carry out Bayesian analyses:
+```{r}
+library(R2jags)
+```
+
+The code:
+```{r}
+model <- function() { 
+    
+    # priors
+    phi ~ dunif(0,1)     # survival 
+    gP ~ dunif(0,1)      # gamma'
+    gPP ~ dunif(0,1)     # gamma'' 
+    gamP <- 1 - gP       # MARK parameterization
+    gamPP <- 1 - gPP     # MARK parameterization
+    mean.p ~ dunif(0,1)  # detection
+    
+    # secondary occasions p's
+    for (t in 1:n.years){
+      for (j in 1:max(n.sec[1:n.years])){
+        p[t,j] <- mean.p
+      }
+    }   
+
+    for (t in 1:n.years){
+      for (j in 1:n.sec[t]){
+        yes[t,j] ~ dbin(p[t,j], total[t,j])
+      }
+    }   
+    
+    # Primary occasions p's or pooled detection probability
+    for (t in 1:n.years){
+      pstar[t] <- 1 - prod(1 - p[t,1:n.sec[t]])
+    }
+    
+    # state matrices
+    s[1,1] <- phi * gPP
+    s[1,2] <- phi * (1 - gPP)
+    s[1,3] <- 1 - phi
+    s[2,1] <- phi * gP
+    s[2,2] <- phi * (1 - gP)
+    s[2,3] <- 1 - phi
+    s[3,1] <- 0
+    s[3,2] <- 0
+    s[3,3] <- 1
+
+    # observation matrices
+    for (t in 1:n.years){
+      o[1,t,1] <- pstar[t]
+      o[1,t,2] <- 1 - pstar[t]
+      o[2,t,1] <- 0
+      o[2,t,2] <- 1
+      o[3,t,1] <- 0
+      o[3,t,2] <- 1
+    }
+
+    # likelihood
+    for (i in 1:n.ind){
+      z[i,first[i]] <- ch[i,first[i]]
+      for (t in (first[i]+1):n.years){
+        z[i,t] ~ dcat(s[z[i,t-1], ])   # state equations
+        ch[i,t] ~ dcat(o[z[i,t], t, ]) # obsevation equations
+      } 
+    }
+    
+}
+```
+
+Build the list of data
+```{r}
+dat <- list(first = first, 
+            ch = ch, 
+            n.sec = n.secondary, 
+            n.years = ncol(ch), 
+            n.ind = nrow(ch),
+            yes = yes, 
+            total = total)
+```
+
+The initial values:
+```{r}
+inits <- function(){list(z = z.init)}
+```
+
+Define the parameters we'd like to monitor:
+```{r}
+pars <- c('pstar','mean.p','phi','gamP','gamPP')
+```
+
+The MCMC settings (number of iterations for burnin and post-inference probably need to be increased):
+```{r}
+n.chains <- 1
+n.iter <- 1000
+n.burnin <- 500
+```
+
+And run the model:
+```{r}
+res_markovian <- jags(data = dat, 
+             inits = inits, 
+             parameters.to.save = pars, 
+             model.file = model, 
+             n.chains = n.chains,
+             n.iter = n.iter, 
+             n.burnin = n.burnin)
+```
+
+Posterior density distribution of the parameters:
+```{r}
+library(lattice)
+jagsfit.mcmc <- as.mcmc(res_markovian)
+densityplot(jagsfit.mcmc)
+```
+
+Display the results:
+```{r}
+summary(jagsfit.mcmc)
+```
+
+Provide posterior means for population size:
+```{r}
+Nmcmc <- matrix(NA, nrow(res_markovian$BUGSoutput$sims.list$pstar), n.primary)
+for (i in 1:n.primary){
+  Nmcmc[,i] <- caught[i] / res_markovian$BUGSoutput$sims.list$pstar[,i]
+}
+apply(Nmcmc,2,mean)
+```
+
+If we compare to the frequentist results, we're pretty close I'd say. Now let's fit the model with random emigration.
+
+### Random emigration
+
+The code:
+```{r}
+model <- function() {
+  
+    # priors
+    phi ~ dunif(0,1)     # survival  
+    gamma ~ dunif(0,1)   # gamma
+    gam <- 1 - gamma     # MARK parameterization
+    mean.p ~ dunif(0,1)  # detection
+    
+    # secondary occasions p's
+    for (t in 1:n.years){
+      for (j in 1:max(n.sec[1:n.years])){
+        p[t,j] <- mean.p
+      }
+    }
+
+    for (t in 1:n.years){
+      for (j in 1:n.sec[t]){
+        yes[t,j] ~ dbin(p[t,j], total[t,j])
+      }
+    }   
+    
+    # primary occasions p's or pooled detection probability
+    for (t in 1:n.years){
+      pstar[t] <- 1 - prod(1 - p[t,1:n.sec[t]])
+    }
+    
+    # likelihood
+
+    for (i in 1:n.ind){
+    z[i,first[i]] <- ch[i,first[i]]
+      for (t in (first[i]+1):n.years){
+        mu1[i,t] <- z[i,t-1] * phi
+        mu2[i,t] <- z[i,t] * (gamma) * pstar[t]
+        z[i,t] ~ dbern(mu1[i,t])  # state equations
+        ch[i,t] ~ dbern(mu2[i,t]) # observation equations
+      } 
+    }
+}
+```
+
+The data
+```{r}
+ch[ch == 2] <- 0 # Bernoulli likelihood
+dat <- list(first = first, 
+            ch = ch, 
+            n.sec = n.secondary, 
+            n.years = ncol(ch), 
+            n.ind = nrow(ch),
+            yes = yes, 
+            total = total)
+```
+
+Then initial values, parameters to monitor, MCMC settings (number of iterations for burnin and post-inference probably need to be increased)
+```{r}
+inits <- function(){list(z = z.init)}  
+pars <- c('pstar','mean.p','phi','gam')
+n.chains <- 1
+n.iter <- 1000
+n.burnin <- 500
+```
+
+We are ready to fit the model to the data:
+```{r}
+res_random <- jags(data = dat, 
+             inits = inits, 
+             parameters.to.save = pars,
+             model.file = model, 
+             n.chains = n.chains,
+             n.iter = n.iter, 
+             n.burnin = n.burnin)
+```
+
+
+Posterior density distribution of the parameters:
+```{r}
+jagsfit.mcmc <- as.mcmc(res_random)
+densityplot(jagsfit.mcmc)
+```
+
+Display the results:
+```{r}
+summary(jagsfit.mcmc)
+```
+
+Provide posterior means for population size:
+```{r}
+Nmcmc <- matrix(NA, nrow(res_random$BUGSoutput$sims.list$pstar), n.primary)
+for (i in 1:n.primary){
+  Nmcmc[,i] <- caught[i] / res_random$BUGSoutput$sims.list$pstar[,i]
+}
+apply(Nmcmc,2,mean)
+```
+
+Again, pretty close. 
