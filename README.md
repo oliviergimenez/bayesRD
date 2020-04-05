@@ -1,14 +1,5 @@
 # Bayesian implementation of capture-recapture models with robust design
 
----
-title: "Bayesian implementation of capture-recapture models with robust design"
-output:
-  html_document:
-    keep_md: yes
----
-
-
-
 ## Motivation
 
 I am currently involved in the [estimation of the population size of the brown bear population in the Pyrenees](https://www.biorxiv.org/content/10.1101/075663v1). So far, we have been using a frequentist capture-recapture approach using the robust design. Because it is a small population, I'm interested in implementing a Bayesian approach. To do so, Thomas Riecke and colleagues have proposed [a parameterization and some BUGS code](https://besjournals.onlinelibrary.wiley.com/doi/abs/10.1111/2041-210X.13065) to fit robust-design capture-recapture methods. Here, I am using the code they made available, tweaking it a bit and making it generic. Also, I provide a fully reproducible example. For more details about the robust design, check out [the dedicated chapter](http://www.phidot.org/software/mark/docs/book/pdf/chap15.pdf) in the Gentle Introduction to Mark. For extension of the Riecke's model to Jolly-Seber models, see [here](https://esajournals.onlinelibrary.wiley.com/doi/full/10.1002/ecs2.2334), and for an alternative Bayesian implementation of the robust design, check out the work by Robert Rankin and colleagues [there](https://www.frontiersin.org/articles/10.3389/fmars.2016.00025/full).
@@ -498,7 +489,7 @@ jagsfit.mcmc <- as.mcmc(res_markovian)
 densityplot(jagsfit.mcmc)
 ```
 
-![](bayesianRD_files/figure-html/unnamed-chunk-27-1.png)<!-- -->
+![](unnamed-chunk-27-1.png)<!-- -->
 
 Display the results:
 
@@ -659,7 +650,7 @@ jagsfit.mcmc <- as.mcmc(res_random)
 densityplot(jagsfit.mcmc)
 ```
 
-![](bayesianRD_files/figure-html/unnamed-chunk-34-1.png)<!-- -->
+![](unnamed-chunk-34-1.png)<!-- -->
 
 Display the results:
 
